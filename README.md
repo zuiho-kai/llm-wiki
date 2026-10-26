@@ -55,15 +55,30 @@ use four fixed sections: `Current state`, `Key facts`, `Decisions & pitfalls` an
 - **Day.** When a session closes (hook), or after it has been idle for 30 minutes (`--pending`), a fast model
   ingests the new part of the transcript. There is no checking pass. If the model fails, the fallback engine
   redoes the batch. If the Claude quota refuses the call, the batch waits for the night.
-- **Night (`--nightly`).** The night engine ingests what the day left. Then the review engine reads each
-  transcript span that was ingested during the day, together with the diff the day pass wrote. It fixes
-  errors, adds missing facts and removes duplicates. It changes only lines from that diff.
+- **Night (`--nightly`).** The night engine ingests what the day left. Then the **Diff Engine** reads each
+  transcript span that was ingested during the day, together with the diff the day pass wrote, one added fact
+  line at a time. Script checks run first: every `「quote」` and every "the user said / decided" line must match a
+  USER line of the cited session, and conflicts between pages are listed as hints (not verdicts: similar
+  templates on different pages can be false positives). A model then gives each line one
+  verdict — `supported`, `contradicted`, `stale`, `misattributed` or `unsupported` — with sid8 + quote
+  evidence. Only `misattributed` and `contradicted` lines with script-verified evidence are auto-fixed; the rest
+  become todos and are not deleted. The report is `state/diff-YYYY-MM-DD.json`; `log.md` gets one summary line
+  plus the human-readable todo lines.
+  The review engine then fills gaps and dedupes without touching the todo lines.
 - **Week (`--lint`).** The lint engine checks the whole wiki: navigation, duplicates, contradictions, stale
   facts, scope, format and budgets. It also reads your resident rule files (`rule_files`) and suggests rules
   to move, delete or merge. It never edits those files.
-- **Dream (every night).** A model reads only what you said since the last dream, each line together with the
-  assistant reply before it. It records recurring corrections and preferences in `misc/rule-candidates.md` as
-  candidates for you to decide on. A script checks every quote against the session it cites.
+- **Dream / Proposal Engine (every night).** A model reads only what you said since the last dream, each line
+  together with the assistant reply before it. It outputs structured candidates: a stable dedup key, the rule
+  draft, the target (a resident rule file + section, or a hook/test), and every occurrence with date + sid8 +
+  verbatim quote. The script normalizes keys and merges records that share a normalized key, an identical draft,
+  or a near-identical normalized draft (numeric variants stay separate); the dream prompt asks the model to use
+  one canonical key for synonymous candidates (the script does not infer semantics from different wording). Only
+  a candidate with at least 2 occurrences is shown as an open item in `misc/rule-candidates.md`, and a candidate
+  you rejected is never proposed again. `ingest.py proposals list` shows the records; `accept <id>` refuses a
+  candidate below that threshold, writes a relative patch under `state/proposals/` without editing the rule
+  file, and prints the directory to apply it from; `reject <id> [reason]` records the decision. The page is
+  generated from `misc/rule-candidates.json` (tracked), so the human page and machine state stay in sync.
 - **Acceptance (every pass).** The script does not trust what the model reports. It checks that `bin/lint.py`
   passes, that each session has a new `log.md` entry, that only wiki pages changed (not `CLAUDE.md`, `bin/`,
   `schema/` or hidden files), that `log.md` is append-only, and that there is no mass deletion.
@@ -186,6 +201,8 @@ one run. If you switch later, existing pages keep their old section names and fa
 | `remote` | `""` | git remote to pull from and push to (`""` = local only) |
 | `proxy` | `""` | HTTP(S) proxy tried first for pull/push, then a direct connection |
 | `language` | `"en"` | `"en"` or `"zh"`: model prompts, page section names, lint phrases ([Language](#language)) |
+| `diff_engine` | `true` | `true`: the nightly Diff Engine + per-line verdicts + `state/diff-*.json`; `false`: the old review pass |
+| `proposal_engine` | `true` | `true`: structured dream candidates + the proposals CLI + generated page; `false`: the old dream |
 
 Engine names: `haiku`, `sonnet`, `opus` (or any model name the `claude` CLI accepts), `claude`
 (= `claude_model`), `codex` or `codex:<effort>` (for example `codex:high`), and `agy`. All engines get the
@@ -201,11 +218,16 @@ ingest.py --nightly        night run: leftovers, split, dream, review
 ingest.py --lint           weekly lint, then dream
 ingest.py --status         list sessions with new content
 ingest.py --usage [DAYS]   token use per day and model
+ingest.py proposals list [--json]   structured rule candidates (open / accepted / rejected)
+ingest.py proposals accept ID            write a patch under state/proposals/, never edit the rule file;
+                                         prints the directory to apply it from (≥2 occurrences required)
+ingest.py proposals reject ID [reason]   record a rejection; the candidate is never proposed again
 lint.py [--stats|--warn] [--language en|zh]   structural check / sizes / near-budget warnings
 ```
 
 Runtime files (all git-ignored) sit in the wiki root: `.ingest.log`, `.ingest.sqlite`, `.ingest-usage.tsv`,
-`.ingest.lock`, `.ingest.queue` and the `.ingest-work/` worktree.
+`.ingest.lock`, `.ingest.queue`, `state/` (Diff Engine reports, `proposals/*.patch`) and the
+`.ingest-work/` worktree. The structured proposal records in `misc/rule-candidates.json` are tracked, like the page.
 
 ## Finding the original conversation
 
@@ -221,7 +243,10 @@ python3 -m unittest discover -s tests -v
 
 The ingest tests run the real pipeline against a stand-in `claude` CLI (`tests/fake-engine/claude`). The fake
 writes pages the way a model would, so the tests cover acceptance, rejection, fallback, the hook, the nightly
-review, the dream quote check and the first push to an empty remote, in both languages, with no model calls.
+Diff Engine (report + auto-fix of a fabricated attribution), the structured dream, the proposals CLI and the
+first push to an empty remote, in both languages, with no model calls. `tests/test_diff_engine.py` and
+`tests/test_proposal_engine.py` exercise the deterministic checks, dedup/threshold/reject logic and the
+accept-patch rule directly on small samples.
 
 ## License
 

@@ -53,12 +53,21 @@ Claude 只读到问题需要的深度：`MEMORY.md` → `infra/README.md` → `i
 
 - **白天。** 会话关闭时（hook），或空闲满 30 分钟后（`--pending`），快模型写入会话记录里新增的部分，不做核对。
   模型失败时由兜底引擎重做这一批。Claude 额度拒绝时，这一批留到晚上。
-- **夜间（`--nightly`）。** 夜间引擎写入白天剩下的。然后复核引擎读白天写入过的每段会话记录，连同白天那一轮写出的 diff，
-  改错、补漏、去重。它只改那份 diff 里的行。
+- **夜间（`--nightly`）。** 夜间引擎写入白天剩下的。然后 **Diff Engine** 读白天写入过的每段会话记录，连同白天那一轮
+  写出的 git diff，按一个新增事实行一条来核对。先跑确定性检查：每个 `「引文」`、每条「用户说/用户定」都必须对上
+  所引会话的 USER 行，并列出跨页面的冲突（只是提示，不是结论；不同页面上的相似模板可能误报）；再由模型给每行一个结论：
+  `supported` / `contradicted` / `stale` / `misattributed` / `unsupported`，附 sid8 + 原话证据。只有
+  `misattributed` 和证据经脚本核实过的 `contradicted` 会自动修；其余写成待办，不擅自删改。报告在
+  `state/diff-YYYY-MM-DD.json`，`log.md` 记一行汇总和可读的待办行。之后 review 引擎只补漏、去重，不碰待办行。
 - **每周（`--lint`）。** lint 引擎检查整个 wiki：导航、重复、矛盾、过时、范围、格式、预算。它也读你的常驻规则文件
   （`rule_files`），建议哪些规则该移出、删除或合并。它从不改这些文件。
-- **Dream（每晚）。** 模型只读上次 dream 以来你说的话，每句连同它前面那条助手回复。它把反复出现的纠正和偏好
-  记进 `misc/rule-candidates.md`，作为候选由你决定。脚本会对照所引的会话核对每一句引文。
+- **Dream / Proposal Engine（每晚）。** 模型只读上次 dream 以来你说的话，每句连同它前面那条助手回复。它输出结构化
+  候选：稳定的去重键、规则草稿、目标（哪个规则文件的哪一节，或 hook/测试），以及每次出现（日期、sid8、逐字原话）。
+  脚本规范化 key，并合并 key 相同、草稿逐字相同或近似相同的记录（只有数字不同的规则变体不合并）；dream 提示要求
+  模型给同义候选同一个 canonical key（脚本不会只靠措辞猜语义）。出现不少于 2 次的才作为待办出现在
+  `misc/rule-candidates.md`，你否决过的候选永远不再提。`ingest.py proposals list` 查看记录；`accept <id>`
+  拒绝不足 2 次的候选，只在 `state/proposals/` 生成相对路径补丁、不改规则文件，并打印应从哪里应用补丁；
+  `reject <id> [原因]` 记录否决。页面由 `misc/rule-candidates.json`（纳入 git）生成，人看的页面和机器状态保持一致。
 - **验收（每一轮）。** 脚本不信模型的自述。它检查：`bin/lint.py` 通过；每个会话在 `log.md` 有一条新条目；
   只改了 wiki 页面（没改 `CLAUDE.md`、`bin/`、`schema/` 或隐藏文件）；`log.md` 只追加；没有大量删除。
 - **隔离。** 模型在单独的 git worktree（`.ingest-work`）里改，从不碰你的工作区。只有验收通过的提交才 cherry-pick
@@ -173,6 +182,8 @@ schema 和记忆指令要用同一种语言：英文用 `CLAUDE.md`（= `schema/
 | `remote` | `""` | pull/push 用的 git 远端（`""` = 只在本地） |
 | `proxy` | `""` | pull/push 先试的 HTTP(S) 代理，失败再直连 |
 | `language` | `"en"` | `"en"` 或 `"zh"`：模型提示、页面节名、lint 用语（见[语言](#语言)） |
+| `diff_engine` | `true` | `true`：夜间 Diff Engine + 逐行判定 + `state/diff-*.json`；`false`：沿用旧 review |
+| `proposal_engine` | `true` | `true`：结构化 dream 候选 + proposals 命令 + 生成页面；`false`：沿用旧 dream |
 
 引擎名：`haiku`、`sonnet`、`opus`（或 `claude` CLI 接受的任何模型名）、`claude`（= `claude_model`）、
 `codex` 或 `codex:<effort>`（如 `codex:high`）、`agy`。所有引擎用同一套分步提示（`bin/ingest.py` 里的 `SOP_*`），
@@ -188,11 +199,16 @@ ingest.py --nightly        夜间运行：补写、拆分、dream、复核
 ingest.py --lint           每周整理，然后 dream
 ingest.py --status         列出有新内容的会话
 ingest.py --usage [DAYS]   按天、按模型统计 token 用量
+ingest.py proposals list [--json]  结构化规则候选（open / accepted / rejected）
+ingest.py proposals accept ID           在 state/proposals/ 生成补丁，不改规则文件；
+                                        打印应用目录；少于 2 次的候选会被拒绝
+ingest.py proposals reject ID [原因]    记录否决，以后不再提
 lint.py [--stats|--warn] [--language en|zh]   结构检查 / 各层大小 / 接近预算的警告
 ```
 
 运行时文件都在 wiki 根目录，都已被 git 忽略：`.ingest.log`、`.ingest.sqlite`、`.ingest-usage.tsv`、`.ingest.lock`、
-`.ingest.queue` 和 `.ingest-work/` worktree。
+`.ingest.queue`、`state/`（Diff Engine 报告、`proposals/*.patch`）和 `.ingest-work/` worktree。结构化的候选记录
+`misc/rule-candidates.json` 和页面一样纳入 git。
 
 ## 找回原始对话
 
@@ -206,7 +222,9 @@ python3 -m unittest discover -s tests -v
 ```
 
 写入测试用一个假的 `claude` CLI（`tests/fake-engine/claude`）跑真实流水线。假引擎像模型一样写页面，
-测试在两种语言下覆盖验收通过、拒收、兜底引擎、hook、夜间复核、dream 引文核对和第一次 push 到空远端，不调用任何模型。
+测试在两种语言下覆盖验收通过、拒收、兜底引擎、hook、夜间 Diff Engine（报告 + 伪造归因自动修复）、结构化 dream、
+proposals 命令和第一次 push 到空远端，不调用任何模型。`tests/test_diff_engine.py` 和
+`tests/test_proposal_engine.py` 用小样例直接测确定性检查、去重/门槛/否决逻辑，以及 accept 只出补丁不改文件。
 
 ## 许可证
 

@@ -101,14 +101,25 @@ Claude Code's memory system adds `node_type`/`originSessionId`/`modified` under
   - Day: SessionEnd hook + `--pending` every 30 min: a fast model (default Haiku) ingests closed/idle sessions,
     no checking pass; a stronger one (default Sonnet) redoes a failed batch; a batch the quota refuses waits for
     the night. A session closing while a run holds the lock is queued (`.ingest.queue`) for that run.
-  - Night, Mon–Sat 03:00 `--nightly`: the night engine ingests leftovers, then reviews every span the day engine
-    ingested since the last review against its transcript (the script passes the day's ingest diffs; review only
-    corrects those lines) — fix, complete, dedupe (`SOP_REVIEW`). Codex passes resume the same session on capacity
-    errors across `codex_models`, then fall back to `after_codex`.
+  - Night, Mon–Sat 03:00 `--nightly`: the night engine ingests leftovers, then the **Diff Engine** checks every
+    span the day engine ingested since the last review: deterministic checks (quotes, "the user said" claims,
+    cross-page conflicts) run first, then a model gives each added fact line one of
+    `supported / contradicted / stale / misattributed / unsupported` with sid8+quote evidence. Only
+    `misattributed` and script-verified `contradicted` lines are auto-fixed; the rest become todos in
+    `state/diff-YYYY-MM-DD.json`. The review engine then fills gaps and dedupes without touching those todo
+    lines. Codex passes resume the same session on capacity errors across `codex_models`, then fall back to
+    `after_codex`.
   - Week, Sunday 03:00 `--lint`: the lint engine lints the whole wiki.
   - Dream, every night after the nightly or the weekly lint: a model reads what the user said since the last dream
-    and keeps `misc/rule-candidates.md` (recurring corrections/preferences → rule candidates for the user to
-    decide; never edits CLAUDE.md). Quotes are script-checked against the session they cite.
+    and produces structured **Proposal Engine** candidates (dedup key, rule draft, target rule file/section or
+    hook/test, occurrences with date + sid8 + quote). The script normalizes keys and merges records with the
+    same key, an identical draft, or a near-identical normalized draft (numeric variants stay separate); the
+    prompt asks the model for one canonical key per synonymous topic (the script cannot infer semantics from
+    different wording alone). It shows a candidate only after ≥ 2 occurrences in `misc/rule-candidates.md`,
+    never re-proposes a rejected one, and never edits `CLAUDE.md` or other resident rule files. Records live in
+    `misc/rule-candidates.json` (tracked); `bin/ingest.py proposals list|accept <id>|reject <id> [reason]` drives
+    the user decision; `accept` requires ≥ 2 occurrences and only writes a relative patch under
+    `state/proposals/` (the CLI prints its base directory).
   Every engine gets the same SOP prompts, in the configured `language` (`SOP_*`: requirements / rules / SOP / acceptance criteria); the script
   checks acceptance itself (lint ok, a new `ingest|review | <sid8>` log entry per session, only wiki pages
   touched, log.md append-only, no mass deletion). Models edit a git worktree `.ingest-work`, never this working

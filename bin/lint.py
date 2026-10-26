@@ -27,7 +27,7 @@ LANGUAGES = {
            "sessions": "## Related sessions", "todo": "Open items"},
 }
 SPECIAL = {"misc"}
-TOOL_DIRS = {"bin", "launchd", "schema", "tests"}  # the tool's own directories in the repo, not wiki domains
+TOOL_DIRS = {"bin", "launchd", "schema", "tests", "state"}  # the tool's own directories in the repo, not wiki domains
 TOP_FILES = {"MEMORY.md", "CLAUDE.md", "log.md", "README.md", "README.zh-CN.md"}  # README*: the repo's own readme
 LINK = re.compile(r"\]\(([^)]+)\)")
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")

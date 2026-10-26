@@ -85,12 +85,19 @@ Claude Code 的记忆系统写入时会在 `metadata` 下加 `node_type`/`origin
   - 白天：SessionEnd hook + 每 30 分钟 `--pending`：快模型（默认 Haiku）写入关闭/空闲的会话，不做核对；
     写失败的批次由强一点的模型（默认 Sonnet）重做；被额度拒绝的批次等晚上。某个 run 持锁时关闭的会话进队列
     （`.ingest.queue`），由那个 run 接着处理。
-  - 夜间，周一至周六 03:00 `--nightly`：夜间引擎写入白天剩下的，再对照会话记录复核自上次复核以来白天写入的每一段
-    （脚本把白天的 ingest diff 一起给它；复核只改这些行）——改错、补漏、去重（`SOP_REVIEW`）。Codex 遇到容量错误时
-    在 `codex_models` 里换模型续跑同一会话，再失败就换 `after_codex`。
+  - 夜间，周一至周六 03:00 `--nightly`：夜间引擎写入白天剩下的，然后 **Diff Engine** 核对自上次复核以来白天写入的每一段：
+    先跑确定性检查（引文、「用户说」类归因、跨页面冲突），再由模型给每个新增事实行一个结论
+    `supported / contradicted / stale / misattributed / unsupported`，附 sid8 + 原话证据。只自动修 `misattributed`
+    和证据经脚本核实的 `contradicted`，其余写进 `state/diff-YYYY-MM-DD.json` 的待办；之后的 review 引擎只补漏、去重，
+    不动这些待办行。Codex 遇到容量错误时在 `codex_models` 里换模型续跑同一会话，再失败就换 `after_codex`。
   - 每周，周日 03:00 `--lint`：lint 引擎整理整个 wiki。
-  - Dream：每晚在 nightly 或周 lint 之后，读上次 dream 以来用户说的话，维护 `misc/rule-candidates.md`
-    （反复出现的纠正/偏好 → 规则候选，由用户决定；从不改 CLAUDE.md）。引文由脚本对照所引会话核对。
+  - Dream：每晚在 nightly 或周 lint 之后，读上次 dream 以来用户说的话，输出结构化的 **Proposal Engine** 候选
+    （去重键、规则草稿、目标规则文件/节或 hook/测试、每次出现的日期 + sid8 + 原话）。脚本规范化 key，并合并
+    key 相同、草稿逐字相同或近似相同的记录（只有数字不同的规则变体不合并）；dream 提示要求模型给同义候选同一个
+    canonical key（脚本不会只靠措辞猜语义）。出现 ≥ 2 次的才写进 `misc/rule-candidates.md` 待办，否决过的永远不再提；
+    从不改 `CLAUDE.md` 等常驻规则文件。结构化记录在 `misc/rule-candidates.json`（纳入 git）；
+    `bin/ingest.py proposals list|accept <id>|reject <id> [原因]` 驱动用户决定，`accept` 要求 ≥ 2 次，
+    只在 `state/proposals/` 生成相对路径补丁（CLI 会打印应用目录）。
   所有引擎用同一套 SOP 提示（语言随 `language` 配置）（`SOP_*`：要求 / 规则 / SOP / 验收标准）；脚本自己验收（lint ok、每个会话一条新的
   `ingest|review | <sid8>` 日志、只动 wiki 页面、log.md 只追加、没有大量删除）。模型在 git worktree `.ingest-work`
   里改，从不碰本工作区；验收通过的提交 cherry-pick 到这里，配置了 `remote` 时再 push。

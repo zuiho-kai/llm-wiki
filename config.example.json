@@ -21,5 +21,7 @@
   ],
   "remote": "",
   "proxy": "",
-  "language": "en"
+  "language": "en",
+  "diff_engine": true,
+  "proposal_engine": true
 }

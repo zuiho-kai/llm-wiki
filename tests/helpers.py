@@ -4,7 +4,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 FAKE = REPO / "tests" / "fake-engine"
-SKIP = shutil.ignore_patterns(".git", ".ingest*", "__pycache__", "config.json")
+SKIP = shutil.ignore_patterns(".git", ".ingest*", "__pycache__", "config.json", "state")
 
 
 def git(cwd, *args):

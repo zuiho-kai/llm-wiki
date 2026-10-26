@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Stand-in for the `claude` CLI in tests: pretends to be a model that edits the wiki in its working directory.
 
-Behaviour is chosen by FAKE_MODE (good | touch-schema | no-log | fail-haiku | dream-misquote); every call is
-appended to FAKE_CALLS (if set) as "<model> <task>" so tests can see which engines ran.
+Behaviour is chosen by FAKE_MODE (good | touch-schema | no-log | fail-haiku | dream-misquote | bad-write);
+every call is appended to FAKE_CALLS (if set) as "<model> <task>" so tests can see which engines ran.
 """
 import json, os, re, sys, time
 from pathlib import Path
@@ -48,12 +48,29 @@ def register(name, line):
             f.write(f"- [{name}]({name}.md) — {line}\n")
 
 
+def user_lines():
+    """(date, sid8, text) for the USER lines in a dream/diff context."""
+    out, sid = [], None
+    for line in context.splitlines():
+        m = re.match(r"=== SESSION ([0-9a-f]{8})", line)
+        if m:
+            sid = m.group(1)
+        m = re.match(r"USER \[(\d\d-\d\d)\]: (.+)", line)
+        if m and sid:
+            out.append((m.group(1), sid, m.group(2)))
+    return out
+
+
 if task == "INGEST":
     users = re.findall(r"^USER: (.+)$", context, re.M)
     page = wiki / "misc" / "demo-facts.md"
+    body = "".join(f"- {u[:200]}\n" for u in users)
+    if mode == "bad-write":
+        body += "- 用户定：演示服务器使用 MySQL\n"  # no quote: the Diff Engine must flag misattributed
+    if mode == "todo-write":
+        body += "- for the todo report: this line is not auto-fixable\n"
     page.write_text("---\nname: demo-facts\ndescription: facts from the demo session\nmetadata:\n"
-                    "  scope: facts the demo transcript states\n---\n# Demo facts\n" + KEY + "\n"
-                    + "".join(f"- {u[:200]}\n" for u in users))
+                    "  scope: facts the demo transcript states\n---\n# Demo facts\n" + KEY + "\n" + body)
     register("demo-facts", "facts from the demo session")
     if mode != "no-log":
         append_log("ingest")
@@ -61,21 +78,59 @@ if task == "INGEST":
         with open(wiki / "CLAUDE.md", "a") as f:
             f.write("\nedited by a model\n")
     reply("misc/demo-facts.md: added")
+elif task == "DIFF":
+    changes, cur = [], None
+    for line in context.splitlines():
+        m = re.match(r"=== CHANGE (\d+) \| .* \| sid8=(.*) ===", line)
+        if m:
+            cur = {"index": int(m.group(1)), "text": ""}
+            changes.append(cur)
+        elif cur and not cur["text"] and line and not line.startswith("DETERMINISTIC:"):
+            cur["text"] = line
+    verdicts = []
+    for c in changes:
+        text = c["text"]
+        if mode == "bad-write" and ("用户定" in text or ("用户说" in text and "「" not in text)):
+            verdicts.append({"index": c["index"], "verdict": "misattributed", "evidence": [],
+                             "reason": "fake bad-write line"})
+        elif mode == "todo-write" and "this line is not auto-fixable" in text:
+            verdicts.append({"index": c["index"], "verdict": "unsupported", "evidence": [],
+                             "reason": "fake todo line"})
+        else:
+            verdicts.append({"index": c["index"], "verdict": "supported", "evidence": [], "reason": "fake"})
+    reply(json.dumps({"verdicts": verdicts}, ensure_ascii=False))
 elif task == "REVIEW":
+    if mode == "bad-write":
+        page = wiki / "misc" / "demo-facts.md"
+        text = page.read_text()
+        page.write_text("\n".join(l for l in text.splitlines() if not l.startswith("- 用户定：")) + "\n")
+    if mode == "delete-page":
+        page = wiki / "misc" / "demo-facts.md"
+        if page.exists():
+            page.unlink()
+    if mode == "extend-line":
+        page = wiki / "misc" / "demo-facts.md"
+        page.write_text("\n".join(l + "2" if "2222" in l else l for l in page.read_text().splitlines()) + "\n")
     append_log("review")
     reply("无修改")
 elif task == "DREAM":
-    quotes = []
-    sid = None
-    for line in context.splitlines():
-        m = re.match(r"=== SESSION ([0-9a-f]{8})", line)
-        if m:
-            sid = m.group(1)
-        m = re.match(r"USER \[(\d\d-\d\d)\]: (.+)", line)
-        if m and sid:
-            quotes.append((m.group(1), sid, m.group(2)[:20]))
-    if mode == "dream-misquote":
-        quotes = [(d, s, "the user never said this") for d, s, _ in quotes]
+    lines = user_lines()
+    if '"candidates"' in instruction:  # structured Proposal Engine prompt
+        candidates = []
+        for day, sid, quote in lines:
+            q = "the user never said this" if mode == "dream-misquote" else quote[:20]
+            if mode == "dream-short":
+                q = quote[:1]  # present in the text but too short to prove anything
+            candidate = {"key": "pref-" + re.sub(r"\W+", "", quote[:24]),
+                         "draft": quote[:40],
+                         "target": {"kind": "rule", "file": "~/.claude/CLAUDE.md", "section": "Rules"},
+                         "occurrences": [{"date": day, "sid8": sid, "quote": q}]}
+            if mode == "dream-invalid":
+                candidate.pop("draft")  # structural error: the batch must not be marked dreamed
+            candidates.append(candidate)
+        reply(json.dumps({"candidates": candidates}, ensure_ascii=False))
+    quotes = [(d, s, "the user never said this" if mode == "dream-misquote" else q[:20])
+              for d, s, q in lines]
     page = wiki / "misc" / "rule-candidates.md"
     page.write_text("---\nname: rule-candidates\ndescription: rule candidates from dream\nmetadata:\n"
                     "  scope: recurring corrections and preferences for the user to decide\n---\n# Rule candidates\n"
